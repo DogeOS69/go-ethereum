@@ -41,6 +41,9 @@ import (
 var (
 	errPrecompileDisabled     = errors.New("sha256, ripemd160, blake2f precompiles temporarily disabled")
 	errModexpUnsupportedInput = errors.New("modexp temporarily only accepts inputs of 32 bytes (256 bits) or less")
+	errTransferInvalidCaller  = errors.New("invalid caller for transfer precompile")
+	errTransferInvalidInput   = errors.New("invalid transfer call input")
+	errTransferRequiresState  = errors.New("transfer precompile requires stateful EVM context")
 )
 
 // PrecompiledContract is the basic interface for native Go contracts. The implementation
@@ -50,6 +53,18 @@ type PrecompiledContract interface {
 	RequiredGas(input []byte) uint64  // RequiredPrice calculates the contract gas use
 	Run(input []byte) ([]byte, error) // Run runs the precompiled contract
 }
+
+// StatefulPrecompiledContract is implemented by native contracts that need access
+// to the current EVM state or call context.
+type StatefulPrecompiledContract interface {
+	PrecompiledContract
+	RunStateful(evm *EVM, caller common.Address, input []byte, readOnly bool) ([]byte, error)
+}
+
+var (
+	transferPrecompileAddress = common.BytesToAddress([]byte{0xfd})
+	dogeTokenContractAddress  = params.DefaultDogeTokenAddress
+)
 
 // PrecompiledContractsHomestead contains the default set of pre-compiled Ethereum
 // contracts used in the Frontier and Homestead releases.
@@ -172,6 +187,7 @@ var PrecompiledContractsGalileo = map[common.Address]PrecompiledContract{
 	common.BytesToAddress([]byte{8}):          &bn256PairingIstanbul{limitInputLength: false},
 	common.BytesToAddress([]byte{9}):          &blake2FDisabled{},
 	common.BytesToAddress([]byte{0x01, 0x00}): &p256Verify{eip7951: true},
+	transferPrecompileAddress:                 &transferPrecompile{},
 }
 
 // PrecompiledContractsBLS contains the set of pre-compiled Ethereum
@@ -267,6 +283,59 @@ func RunPrecompiledContract(p PrecompiledContract, input []byte, suppliedGas uin
 	suppliedGas -= gasCost
 	output, err := p.Run(input)
 	return output, suppliedGas, err
+}
+
+// transferPrecompile implements native balance transfers for the DOGE token
+// contract. The ABI-encoded input is (address from, address to, uint256 value).
+type transferPrecompile struct{}
+
+func (c *transferPrecompile) RequiredGas(input []byte) uint64 {
+	return params.TransferGas
+}
+
+func (c *transferPrecompile) Run(input []byte) ([]byte, error) {
+	return nil, errTransferRequiresState
+}
+
+// See celo implementation for reference:
+// https://github.com/celo-org/op-geth/blob/celo-v2.2.4/core/vm/celo_contracts.go#L15-L119
+// Key points for other clients to implement:
+//  1. Rejects STATICCALL / inherited read-only context with ErrWriteProtection.
+//  2. Rejects any caller other than the configured DOGE token address.
+//  3. Rejects non-96-byte input.
+//  4. Warms both from and to by adding them to the access list regardless of the value.
+//  5. If balance is insufficient, returns ErrInsufficientBalance; the EVM call snapshot reverts balance and access-list changes.
+//  6. Calls Transfer(from, to, value). For zero value, Transfer still loads or
+//     creates state objects for both from and to via SubBalance/AddBalance;
+//     SubBalance(0) does not journal-touch from, while AddBalance(0)
+//     journal-touches to if it is empty.
+func (c *transferPrecompile) RunStateful(evm *EVM, caller common.Address, input []byte, readOnly bool) ([]byte, error) {
+	if readOnly {
+		return nil, ErrWriteProtection
+	}
+
+	if caller != evm.chainConfig.Scroll.DogeTokenAddressOrDefault() {
+		return nil, errTransferInvalidCaller
+	}
+
+	if len(input) != 96 {
+		return nil, errTransferInvalidInput
+	}
+	from := common.BytesToAddress(input[12:32])
+	to := common.BytesToAddress(input[44:64])
+	value := new(big.Int).SetBytes(input[64:96])
+
+	if evm.StateDB != nil {
+		evm.StateDB.AddAddressToAccessList(from)
+		evm.StateDB.AddAddressToAccessList(to)
+	}
+
+	if !evm.Context.CanTransfer(evm.StateDB, from, value) {
+		return nil, ErrInsufficientBalance
+	}
+	evm.Context.Transfer(evm.StateDB, from, to, value)
+
+	return nil, nil
 }
 
 // ECRECOVER implemented as a native contract.

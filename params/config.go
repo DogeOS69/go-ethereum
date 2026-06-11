@@ -44,6 +44,10 @@ var (
 	ScrollSepoliaMissingHeaderFieldsSHA256 = common.HexToHash("0xa02354c12ca0f918bf4768255af9ed13c137db7e56252348f304b17bb4088924")
 )
 
+// DefaultDogeTokenAddress is the fallback DOGE token contract allowed to call
+// the transfer precompile when no chain-specific address is configured.
+var DefaultDogeTokenAddress = common.HexToAddress("0x000000000000000000000000000000000000d09e")
+
 func newUint64(val uint64) *uint64 { return &val }
 
 // TrustedCheckpoints associates each known checkpoint with the genesis hash of
@@ -715,6 +719,9 @@ type ScrollConfig struct {
 	// Transaction fee vault address [optional]
 	FeeVaultAddress *common.Address `json:"feeVaultAddress,omitempty"`
 
+	// DOGE token contract address allowed to call the transfer precompile [optional]
+	DogeTokenAddress *common.Address `json:"dogeTokenAddress,omitempty"`
+
 	// L1 config
 	L1Config *L1Config `json:"l1Config,omitempty"`
 
@@ -757,6 +764,13 @@ func (s ScrollConfig) ShouldIncludeL1Messages() bool {
 	return s.L1Config != nil && s.L1Config.NumL1MessagesPerBlock > 0
 }
 
+func (s ScrollConfig) DogeTokenAddressOrDefault() common.Address {
+	if s.DogeTokenAddress != nil {
+		return *s.DogeTokenAddress
+	}
+	return DefaultDogeTokenAddress
+}
+
 func (s ScrollConfig) String() string {
 	maxTxPerBlock := "<nil>"
 	if s.MaxTxPerBlock != nil {
@@ -778,8 +792,13 @@ func (s ScrollConfig) String() string {
 		missingHeaderFieldsSHA256 = fmt.Sprintf("%v", *s.MissingHeaderFieldsSHA256)
 	}
 
-	return fmt.Sprintf("{useZktrie: %v, maxTxPerBlock: %v, MaxTxPayloadBytesPerBlock: %v, feeVaultAddress: %v, l1Config: %v, genesisStateRoot: %v, missingHeaderFieldsSHA256: %v}",
-		s.UseZktrie, maxTxPerBlock, maxTxPayloadBytesPerBlock, s.FeeVaultAddress, s.L1Config.String(), genesisStateRoot, missingHeaderFieldsSHA256)
+	dogeTokenAddress := "<nil>"
+	if s.DogeTokenAddress != nil {
+		dogeTokenAddress = s.DogeTokenAddress.Hex()
+	}
+
+	return fmt.Sprintf("{useZktrie: %v, maxTxPerBlock: %v, MaxTxPayloadBytesPerBlock: %v, feeVaultAddress: %v, dogeTokenAddress: %v, l1Config: %v, genesisStateRoot: %v, missingHeaderFieldsSHA256: %v}",
+		s.UseZktrie, maxTxPerBlock, maxTxPayloadBytesPerBlock, s.FeeVaultAddress, dogeTokenAddress, s.L1Config.String(), genesisStateRoot, missingHeaderFieldsSHA256)
 }
 
 // IsValidTxCount returns whether the given block's transaction count is below the limit.

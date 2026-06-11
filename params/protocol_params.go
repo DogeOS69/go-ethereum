@@ -164,6 +164,7 @@ const (
 
 	P256VerifyGas        uint64 = 3450 // secp256r1 elliptic curve signature verifier gas price after euclidv2 upgrade
 	P256VerifyGasGalileo uint64 = 6900 // secp256r1 elliptic curve signature verifier gas price after galileo upgrade
+	TransferGas          uint64 = 9000 // Native balance transfer precompile gas price
 
 	// The Refund Quotient is the cap on how much of the used gas can be refunded. Before EIP-3529,
 	// up to half the consumed gas could be refunded. Redefined as 1/5th in EIP-3529

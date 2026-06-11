@@ -21,10 +21,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math/big"
 	"testing"
 	"time"
 
 	"github.com/scroll-tech/go-ethereum/common"
+	"github.com/scroll-tech/go-ethereum/core/rawdb"
+	"github.com/scroll-tech/go-ethereum/core/state"
+	"github.com/scroll-tech/go-ethereum/params"
 )
 
 // precompiledTest defines the input/output pairs for precompiled contract tests.
@@ -422,4 +426,285 @@ func TestPrecompiledP256Verify(t *testing.T) {
 
 func TestPrecompiledP256VerifyGalileo(t *testing.T) {
 	testJson("p256VerifyGalileo", "0x0101", t)
+}
+
+func TestTransferPrecompileActiveInGalileo(t *testing.T) {
+	if !hasPrecompileAddress(ActivePrecompiles(params.Rules{IsGalileo: true}), transferPrecompileAddress) {
+		t.Fatalf("expected transfer precompile %v to be active in Galileo", transferPrecompileAddress)
+	}
+	if hasPrecompileAddress(ActivePrecompiles(params.Rules{IsFeynman: true}), transferPrecompileAddress) {
+		t.Fatalf("did not expect transfer precompile %v to be active before Galileo", transferPrecompileAddress)
+	}
+}
+
+func TestTransferPrecompileCall(t *testing.T) {
+	evm, statedb := newTransferPrecompileTestEVM(t)
+	from := common.HexToAddress("0x1000")
+	to := common.HexToAddress("0x2000")
+	statedb.AddBalance(from, big.NewInt(1000))
+
+	ret, remainingGas, err := evm.Call(AccountRef(dogeTokenContractAddress), transferPrecompileAddress, encodeTransferInput(from, to, big.NewInt(250)), 10000, new(big.Int), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ret) != 0 {
+		t.Fatalf("expected empty return, got %x", ret)
+	}
+	if remainingGas != 1000 {
+		t.Fatalf("expected 1000 gas remaining, got %d", remainingGas)
+	}
+	if balance := statedb.GetBalance(from); balance.Cmp(big.NewInt(750)) != 0 {
+		t.Fatalf("unexpected from balance: %v", balance)
+	}
+	if balance := statedb.GetBalance(to); balance.Cmp(big.NewInt(250)) != 0 {
+		t.Fatalf("unexpected to balance: %v", balance)
+	}
+}
+
+func TestTransferPrecompileWarmsTransferAccounts(t *testing.T) {
+	evm, statedb := newTransferPrecompileTestEVM(t)
+	from := common.HexToAddress("0x1000")
+	to := common.HexToAddress("0x2000")
+	statedb.AddBalance(from, big.NewInt(1000))
+
+	if statedb.AddressInAccessList(from) {
+		t.Fatalf("expected from account to start cold")
+	}
+	if statedb.AddressInAccessList(to) {
+		t.Fatalf("expected to account to start cold")
+	}
+	_, _, err := evm.Call(AccountRef(dogeTokenContractAddress), transferPrecompileAddress, encodeTransferInput(from, to, big.NewInt(250)), 10000, new(big.Int), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !statedb.AddressInAccessList(from) {
+		t.Fatalf("expected from account to be warm")
+	}
+	if !statedb.AddressInAccessList(to) {
+		t.Fatalf("expected to account to be warm")
+	}
+}
+
+func TestTransferPrecompileZeroValueWarmsTransferAccounts(t *testing.T) {
+	evm, statedb := newTransferPrecompileTestEVM(t)
+	from := common.HexToAddress("0x1000")
+	to := common.HexToAddress("0x2000")
+
+	_, _, err := evm.Call(AccountRef(dogeTokenContractAddress), transferPrecompileAddress, encodeTransferInput(from, to, new(big.Int)), 10000, new(big.Int), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !statedb.AddressInAccessList(from) {
+		t.Fatalf("expected from account to be warm")
+	}
+	if !statedb.AddressInAccessList(to) {
+		t.Fatalf("expected to account to be warm")
+	}
+	if !statedb.Exist(from) {
+		t.Fatalf("expected from account to be loaded by zero-value transfer")
+	}
+}
+
+func TestTransferPrecompileRejectsInvalidCaller(t *testing.T) {
+	evm, statedb := newTransferPrecompileTestEVM(t)
+	from := common.HexToAddress("0x1000")
+	to := common.HexToAddress("0x2000")
+	statedb.AddBalance(from, big.NewInt(1000))
+
+	_, remainingGas, err := evm.Call(AccountRef(common.HexToAddress("0x1234")), transferPrecompileAddress, encodeTransferInput(from, to, big.NewInt(250)), 10000, new(big.Int), nil)
+	if err != errTransferInvalidCaller {
+		t.Fatalf("expected invalid caller error, got %v", err)
+	}
+	if remainingGas != 0 {
+		t.Fatalf("expected failed precompile to consume all gas, got %d", remainingGas)
+	}
+	if balance := statedb.GetBalance(from); balance.Cmp(big.NewInt(1000)) != 0 {
+		t.Fatalf("unexpected from balance after failed call: %v", balance)
+	}
+	if balance := statedb.GetBalance(to); balance.Sign() != 0 {
+		t.Fatalf("unexpected to balance after failed call: %v", balance)
+	}
+}
+
+func TestTransferPrecompileUsesConfiguredDogeTokenAddress(t *testing.T) {
+	configuredDogeToken := common.HexToAddress("0x000000000000000000000000000000000000beef")
+
+	t.Run("rejects default address when configured", func(t *testing.T) {
+		evm, statedb := newTransferPrecompileTestEVM(t)
+		evm.chainConfig.Scroll.DogeTokenAddress = &configuredDogeToken
+		from := common.HexToAddress("0x1000")
+		to := common.HexToAddress("0x2000")
+		statedb.AddBalance(from, big.NewInt(1000))
+
+		_, _, err := evm.Call(AccountRef(dogeTokenContractAddress), transferPrecompileAddress, encodeTransferInput(from, to, big.NewInt(250)), 10000, new(big.Int), nil)
+		if err != errTransferInvalidCaller {
+			t.Fatalf("expected invalid caller error, got %v", err)
+		}
+	})
+
+	t.Run("allows configured address", func(t *testing.T) {
+		evm, statedb := newTransferPrecompileTestEVM(t)
+		evm.chainConfig.Scroll.DogeTokenAddress = &configuredDogeToken
+		from := common.HexToAddress("0x1000")
+		to := common.HexToAddress("0x2000")
+		statedb.AddBalance(from, big.NewInt(1000))
+
+		_, _, err := evm.Call(AccountRef(configuredDogeToken), transferPrecompileAddress, encodeTransferInput(from, to, big.NewInt(250)), 10000, new(big.Int), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if balance := statedb.GetBalance(from); balance.Cmp(big.NewInt(750)) != 0 {
+			t.Fatalf("unexpected from balance: %v", balance)
+		}
+		if balance := statedb.GetBalance(to); balance.Cmp(big.NewInt(250)) != 0 {
+			t.Fatalf("unexpected to balance: %v", balance)
+		}
+	})
+}
+
+func TestTransferPrecompileRejectsInvalidInput(t *testing.T) {
+	evm, statedb := newTransferPrecompileTestEVM(t)
+	from := common.HexToAddress("0x1000")
+	to := common.HexToAddress("0x2000")
+	statedb.AddBalance(from, big.NewInt(1000))
+
+	input := encodeTransferInput(from, to, big.NewInt(250))
+	_, _, err := evm.Call(AccountRef(dogeTokenContractAddress), transferPrecompileAddress, input[:len(input)-1], 10000, new(big.Int), nil)
+	if err != errTransferInvalidInput {
+		t.Fatalf("expected invalid input error, got %v", err)
+	}
+	if balance := statedb.GetBalance(from); balance.Cmp(big.NewInt(1000)) != 0 {
+		t.Fatalf("unexpected from balance after failed call: %v", balance)
+	}
+	if balance := statedb.GetBalance(to); balance.Sign() != 0 {
+		t.Fatalf("unexpected to balance after failed call: %v", balance)
+	}
+}
+
+func TestTransferPrecompileRejectsInsufficientBalance(t *testing.T) {
+	evm, statedb := newTransferPrecompileTestEVM(t)
+	from := common.HexToAddress("0x1000")
+	to := common.HexToAddress("0x2000")
+	statedb.AddBalance(from, big.NewInt(100))
+
+	_, _, err := evm.Call(AccountRef(dogeTokenContractAddress), transferPrecompileAddress, encodeTransferInput(from, to, big.NewInt(250)), 10000, new(big.Int), nil)
+	if err != ErrInsufficientBalance {
+		t.Fatalf("expected insufficient balance error, got %v", err)
+	}
+	if balance := statedb.GetBalance(from); balance.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("unexpected from balance after failed call: %v", balance)
+	}
+	if balance := statedb.GetBalance(to); balance.Sign() != 0 {
+		t.Fatalf("unexpected to balance after failed call: %v", balance)
+	}
+	if statedb.AddressInAccessList(from) {
+		t.Fatalf("expected from account to stay cold after failed call")
+	}
+	if statedb.AddressInAccessList(to) {
+		t.Fatalf("expected to account to stay cold after failed call")
+	}
+}
+
+func TestTransferPrecompileOOG(t *testing.T) {
+	evm, statedb := newTransferPrecompileTestEVM(t)
+	from := common.HexToAddress("0x1000")
+	to := common.HexToAddress("0x2000")
+	statedb.AddBalance(from, big.NewInt(1000))
+
+	_, remainingGas, err := evm.Call(AccountRef(dogeTokenContractAddress), transferPrecompileAddress, encodeTransferInput(from, to, big.NewInt(250)), params.TransferGas-1, new(big.Int), nil)
+	if err != ErrOutOfGas {
+		t.Fatalf("expected out-of-gas error, got %v", err)
+	}
+	if remainingGas != 0 {
+		t.Fatalf("expected no gas remaining, got %d", remainingGas)
+	}
+	if balance := statedb.GetBalance(from); balance.Cmp(big.NewInt(1000)) != 0 {
+		t.Fatalf("unexpected from balance after failed call: %v", balance)
+	}
+	if balance := statedb.GetBalance(to); balance.Sign() != 0 {
+		t.Fatalf("unexpected to balance after failed call: %v", balance)
+	}
+}
+
+func TestTransferPrecompileRejectsStaticCall(t *testing.T) {
+	evm, statedb := newTransferPrecompileTestEVM(t)
+	from := common.HexToAddress("0x1000")
+	to := common.HexToAddress("0x2000")
+	statedb.AddBalance(from, big.NewInt(1000))
+
+	_, remainingGas, err := evm.StaticCall(AccountRef(dogeTokenContractAddress), transferPrecompileAddress, encodeTransferInput(from, to, big.NewInt(250)), 10000)
+	if err != ErrWriteProtection {
+		t.Fatalf("expected write protection error, got %v", err)
+	}
+	if remainingGas != 0 {
+		t.Fatalf("expected failed static call to consume all gas, got %d", remainingGas)
+	}
+	if balance := statedb.GetBalance(from); balance.Cmp(big.NewInt(1000)) != 0 {
+		t.Fatalf("unexpected from balance after failed static call: %v", balance)
+	}
+	if balance := statedb.GetBalance(to); balance.Sign() != 0 {
+		t.Fatalf("unexpected to balance after failed static call: %v", balance)
+	}
+}
+
+func TestTransferPrecompileRejectsInheritedReadOnlyCall(t *testing.T) {
+	evm, statedb := newTransferPrecompileTestEVM(t)
+	from := common.HexToAddress("0x1000")
+	to := common.HexToAddress("0x2000")
+	statedb.AddBalance(from, big.NewInt(1000))
+
+	evm.interpreter.readOnly = true
+	_, _, err := evm.Call(AccountRef(dogeTokenContractAddress), transferPrecompileAddress, encodeTransferInput(from, to, big.NewInt(250)), 10000, new(big.Int), nil)
+	evm.interpreter.readOnly = false
+	if err != ErrWriteProtection {
+		t.Fatalf("expected write protection error, got %v", err)
+	}
+	if balance := statedb.GetBalance(from); balance.Cmp(big.NewInt(1000)) != 0 {
+		t.Fatalf("unexpected from balance after failed read-only call: %v", balance)
+	}
+	if balance := statedb.GetBalance(to); balance.Sign() != 0 {
+		t.Fatalf("unexpected to balance after failed read-only call: %v", balance)
+	}
+}
+
+func hasPrecompileAddress(addrs []common.Address, addr common.Address) bool {
+	for _, candidate := range addrs {
+		if candidate == addr {
+			return true
+		}
+	}
+	return false
+}
+
+func newTransferPrecompileTestEVM(t *testing.T) (*EVM, *state.StateDB) {
+	t.Helper()
+
+	statedb, err := state.New(common.Hash{}, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chainConfig := params.TestChainConfig.Clone()
+	galileoTime := uint64(0)
+	chainConfig.GalileoTime = &galileoTime
+
+	evm := NewEVM(BlockContext{
+		CanTransfer: func(db StateDB, addr common.Address, amount *big.Int) bool {
+			return db.GetBalance(addr).Cmp(amount) >= 0
+		},
+		Transfer: func(db StateDB, sender, recipient common.Address, amount *big.Int) {
+			db.SubBalance(sender, amount)
+			db.AddBalance(recipient, amount)
+		},
+		BlockNumber: new(big.Int),
+		Time:        new(big.Int),
+	}, TxContext{}, statedb, chainConfig, Config{})
+	return evm, statedb
+}
+
+func encodeTransferInput(from, to common.Address, value *big.Int) []byte {
+	input := make([]byte, 96)
+	copy(input[12:32], from.Bytes())
+	copy(input[44:64], to.Bytes())
+	copy(input[64:96], common.LeftPadBytes(value.Bytes(), 32))
+	return input
 }

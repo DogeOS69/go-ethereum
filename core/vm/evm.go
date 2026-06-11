@@ -70,6 +70,29 @@ func (evm *EVM) precompile(addr common.Address) (PrecompiledContract, bool) {
 	return p, ok
 }
 
+func (evm *EVM) runPrecompile(p PrecompiledContract, caller common.Address, input []byte, gas uint64) (ret []byte, remainingGas uint64, err error) {
+	gasCost := p.RequiredGas(input)
+	if gas < gasCost {
+		return nil, 0, ErrOutOfGas
+	}
+	gas -= gasCost
+	if sp, ok := p.(StatefulPrecompiledContract); ok {
+		ret, err := sp.RunStateful(evm, caller, input, evm.interpreter.readOnly)
+		return ret, gas, err
+	}
+	ret, err = p.Run(input)
+	return ret, gas, err
+}
+
+func precompileCaller(caller ContractRef, delegate bool) common.Address {
+	if delegate {
+		if contract, ok := caller.(*Contract); ok {
+			return contract.Caller()
+		}
+	}
+	return caller.Address()
+}
+
 // BlockContext provides the EVM with auxiliary information. Once provided
 // it shouldn't be modified.
 type BlockContext struct {
@@ -237,7 +260,7 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 	}
 
 	if isPrecompile {
-		ret, gas, err = RunPrecompiledContract(p, input, gas)
+		ret, gas, err = evm.runPrecompile(p, precompileCaller(caller, false), input, gas)
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.
@@ -310,7 +333,7 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 
 	// It is allowed to call precompiles, even via delegatecall
 	if p, isPrecompile := evm.precompile(addr); isPrecompile {
-		ret, gas, err = RunPrecompiledContract(p, input, gas)
+		ret, gas, err = evm.runPrecompile(p, precompileCaller(caller, false), input, gas)
 	} else {
 		addrCopy := addr
 		// Initialise a new contract and set the code that is to be used by the EVM.
@@ -354,7 +377,7 @@ func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []by
 
 	// It is allowed to call precompiles, even via delegatecall
 	if p, isPrecompile := evm.precompile(addr); isPrecompile {
-		ret, gas, err = RunPrecompiledContract(p, input, gas)
+		ret, gas, err = evm.runPrecompile(p, precompileCaller(caller, true), input, gas)
 	} else {
 		addrCopy := addr
 		// Initialise a new contract and make initialise the delegate values
@@ -384,6 +407,10 @@ func (evm *EVM) StaticCall(caller ContractRef, addr common.Address, input []byte
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, gas, ErrDepth
 	}
+	if !evm.interpreter.readOnly {
+		evm.interpreter.readOnly = true
+		defer func() { evm.interpreter.readOnly = false }()
+	}
 	// We take a snapshot here. This is a bit counter-intuitive, and could probably be skipped.
 	// However, even a staticcall is considered a 'touch'. On mainnet, static calls were introduced
 	// after all empty accounts were deleted, so this is not required. However, if we omit this,
@@ -406,7 +433,7 @@ func (evm *EVM) StaticCall(caller ContractRef, addr common.Address, input []byte
 	}
 
 	if p, isPrecompile := evm.precompile(addr); isPrecompile {
-		ret, gas, err = RunPrecompiledContract(p, input, gas)
+		ret, gas, err = evm.runPrecompile(p, precompileCaller(caller, false), input, gas)
 	} else {
 		// At this point, we use a copy of address. If we don't, the go compiler will
 		// leak the 'contract' to the outer scope, and make allocation for 'contract'
