@@ -328,6 +328,9 @@ func (c *transferPrecompile) RunStateful(evm *EVM, caller common.Address, input 
 	if evm.StateDB != nil {
 		evm.StateDB.AddAddressToAccessList(from)
 		evm.StateDB.AddAddressToAccessList(to)
+		// warm address must present in the witness
+		evm.StateDB.GetBalance(from)
+		evm.StateDB.GetBalance(to)
 	}
 
 	if !evm.Context.CanTransfer(evm.StateDB, from, value) {
