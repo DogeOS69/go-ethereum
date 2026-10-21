@@ -2,6 +2,8 @@ module github.com/scroll-tech/go-ethereum/export-headers-toolkit
 
 go 1.22
 
+toolchain go1.26.10
+
 replace github.com/scroll-tech/go-ethereum => ../../..
 
 require (
