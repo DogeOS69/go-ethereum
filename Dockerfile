@@ -6,6 +6,7 @@ ARG SCROLL_LIB_PATH=/scroll/lib
 
 # Build libzkp dependency
 FROM scrolltech/go-rust-builder:go-1.22.12-rust-nightly-2025-02-14 as chef
+ENV GOTOOLCHAIN=go1.26.10
 WORKDIR app
 
 FROM chef as planner
@@ -23,6 +24,7 @@ RUN cargo build --release
 
 # Build Geth in a stock Go builder container
 FROM scrolltech/go-rust-builder:go-1.22.12-rust-nightly-2025-02-14 as builder
+ENV GOTOOLCHAIN=go1.26.10
 
 ADD . /go-ethereum
 
